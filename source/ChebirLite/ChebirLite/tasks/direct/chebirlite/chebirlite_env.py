@@ -38,6 +38,8 @@ class ChebirliteEnv(DirectRLEnv):
         self.hip_left_left_hip_shin_dof_name_idx,_ = self.robot.find_joints(self.cfg.hip_left_left_hip_shin_dof_name)
         self.bar_bar_body_dof_name_idx,_ = self.robot.find_joints(self.cfg.bar_bar_body_dof_name)
         self.body_idx,_ = self.robot.find_bodies('body')
+        self.left_hip_idx,_ = self.robot.find_bodies('hip_left')
+        self.right_hip_idx,_ = self.robot.find_bodies('hip_right')
 
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
@@ -92,33 +94,73 @@ class ChebirliteEnv(DirectRLEnv):
             self._sample_commands()
         self.actions = self._clip_and_scale_actions(actions.clone())
         self._visualize_markers()
-        # ...existing code if any...
+
+    def _get_left_knee_location(self) -> torch.Tensor:
+        left_hip_loc = self.robot.data.body_state_w[:, self.left_hip_idx[0], :3]
+        left_hip_rots = self.robot.data.body_state_w[:, self.left_hip_idx[0], 3:7]
+        leg_offset = torch.zeros_like(left_hip_loc, device=left_hip_loc.device) + torch.tensor([0.0, self.cfg.thigh_length, 0.0], device=left_hip_loc.device)
+        left_knee_loc = left_hip_loc + math_utils.quat_apply(left_hip_rots, leg_offset)
+        return left_knee_loc
+
+    def _get_right_knee_location(self) -> torch.Tensor:
+        right_hip_loc = self.robot.data.body_state_w[:, self.right_hip_idx[0], :3]
+        right_hip_rots = self.robot.data.body_state_w[:, self.right_hip_idx[0], 3:7]
+        leg_offset = torch.zeros_like(right_hip_loc, device=right_hip_loc.device) + torch.tensor([0.0, self.cfg.thigh_length, 0.0], device=right_hip_loc.device)
+        right_knee_loc = right_hip_loc - math_utils.quat_apply(right_hip_rots, leg_offset)
+        return right_knee_loc
+
+    def _get_top_torso_location(self) -> torch.Tensor:
+        torso_loc = self.robot.data.body_state_w[:, self.body_idx[0], :3]
+        torso_rots = self.robot.data.body_state_w[:, self.body_idx[0], 3:7]
+        offset = torch.tensor([self.cfg.torso_length, 0.0, 0.0], device=torso_loc.device).expand_as(torso_loc)
+        top_torso_loc = torso_loc + math_utils.quat_apply(torso_rots, offset)
+        return top_torso_loc
 
     def _visualize_markers(self):
-        # Use the robot's root position as the torso location,
-        # and add an offset if desired.
-        loc = self.robot.data.body_state_w[:,self.body_idx[0],:3]
-        loc = torch.vstack((loc + self.marker_offset*1.1, loc + self.marker_offset))  # Add an offset for visualization
+        # Arrow locations for command and speed visualization (not true torso top/bottom)
+        torso_base_loc = self.robot.data.body_state_w[:, self.body_idx[0], :3]
+        arrow_loc = torch.vstack((torso_base_loc + self.marker_offset*1.1, torso_base_loc + self.marker_offset))
 
-        # Use the base joint angle (base_base_rotor_dof) for rotation about the vertical axis.
+        # Rotation for arrows
         ang_speed = self.joint_vel[:, self.base_base_rotor_dof_name_idx[0]]
-
         base_angle = self.joint_pos[:, self.base_base_rotor_dof_name_idx[0]]
-        up_vec = torch.tensor([0.0, 0.0, 1.0], device=loc.device)
+        up_vec = torch.tensor([0.0, 0.0, 1.0], device=arrow_loc.device)
         rots_actual = math_utils.quat_from_angle_axis(base_angle + torch.sign(ang_speed)*torch.pi/2, up_vec)
         rots_command = math_utils.quat_from_angle_axis(base_angle + torch.sign(self.command)*torch.pi/2, up_vec)
-        rots = torch.vstack((rots_actual, rots_command))
+        arrow_rots = torch.vstack((rots_actual, rots_command))
 
-        # Dynamic scaling based on command magnitude and angular speed.
-        base_scale = torch.tensor([0.25, 0.25, 0.5], device=loc.device)
+        # Scaling for arrows
+        base_scale = torch.tensor([0.25, 0.25, 0.5], device=arrow_loc.device)
         command_scale = (1+torch.abs(self.command)).unsqueeze(1) * base_scale
         actual_scale = (1+torch.abs(ang_speed)).unsqueeze(1) * base_scale
-        scales = torch.vstack((actual_scale, command_scale))
+        arrow_scales = torch.vstack((actual_scale, command_scale))
 
-        # Visualize command marker.
-        # Here, we assume that marker index 1 corresponds to the command arrow.
+        # Knees
+        left_knee_loc = self._get_left_knee_location()
+        right_knee_loc = self._get_right_knee_location()
+        scales_knee = torch.ones_like(arrow_scales, device=arrow_loc.device) * 0.5  # Smaller scale for knees
+        left_hip_rots = self.robot.data.body_state_w[:, self.left_hip_idx[0], 3:7]
+        right_hip_rots = self.robot.data.body_state_w[:, self.right_hip_idx[0], 3:7]
+
+        # Top torso marker (same marker as knees)
+        top_torso_loc = self._get_top_torso_location()
+        top_torso_rots = self.robot.data.body_state_w[:, self.body_idx[0], 3:7]
+        top_torso_scales = torch.ones_like(arrow_scales, device=arrow_loc.device) * 0.5
+
+        # Stack all marker locations, rotations, and scales
+        loc = torch.vstack((arrow_loc, left_knee_loc, right_knee_loc, top_torso_loc))
+        scales = torch.vstack((arrow_scales, scales_knee, scales_knee, top_torso_scales))
+        rots = torch.vstack((arrow_rots, left_hip_rots, right_hip_rots, top_torso_rots))
+
+        # Marker indices: 0=speed, 1=command, 2=knee, 2=knee, 2=top torso (same as knee)
         num_envs = self.cfg.scene.num_envs
-        marker_indices = torch.hstack((torch.zeros(num_envs), torch.ones(num_envs)))
+        marker_indices = torch.hstack((
+            torch.zeros(num_envs),                # speed arrow
+            torch.ones(num_envs),                 # command arrow
+            2*torch.ones(num_envs),               # left knee
+            2*torch.ones(num_envs),               # right knee
+            2*torch.ones(num_envs),               # top torso
+        ))
         self.visualization_markers.visualize(loc, rots, marker_indices=marker_indices, scales=scales)
 
     def _apply_action(self):
@@ -183,6 +225,14 @@ class ChebirliteEnv(DirectRLEnv):
         actions[:,0] *= -1
         return actions
     
+    def _get_left_hip_location(self) -> torch.Tensor:
+        """Returns left hip location for all envs."""
+        return self.robot.data.body_state_w[:, self.left_hip_idx[0], :3]
+
+    def _get_right_hip_location(self) -> torch.Tensor:
+        """Returns right hip location for all envs."""
+        return self.robot.data.body_state_w[:, self.right_hip_idx[0], :3]
+    
 @torch.jit.script
 def compute_rewards(
     body_vel: torch.Tensor,
@@ -202,16 +252,21 @@ def define_markers() -> VisualizationMarkers:
     marker_cfg = VisualizationMarkersCfg(
         prim_path="/Visuals/myMarkers",
         markers={
-                "speed": sim_utils.UsdFileCfg(
-                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.25, 0.25, 0.5),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
-                ),
-                "command": sim_utils.UsdFileCfg(
-                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.25, 0.25, 0.5),
-                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-                ),
+            "speed": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                scale=(0.25, 0.25, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
+            ),
+            "command": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                scale=(0.25, 0.25, 0.5),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            ),
+            "knee": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                scale=(0.1, 0.1, 0.1),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+            ),
         },
     )
     return VisualizationMarkers(cfg=marker_cfg)

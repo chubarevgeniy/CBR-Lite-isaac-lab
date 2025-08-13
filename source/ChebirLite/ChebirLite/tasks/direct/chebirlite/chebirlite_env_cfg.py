@@ -145,6 +145,8 @@ class ChebirliteEnvCfg(DirectRLEnvCfg):
     hip_right_right_hip_shin_dof_name = "hip_right_right_hip_shin"
     # initial tilt angle variation
     initial_tilt_angle_variation = 20/180 * math.pi  # 20 degrees in radians
+    thigh_length = 0.18
+    torso_length = 0.16
 
     # - action scale
     action_scale = 70 / 180 * math.pi  #
