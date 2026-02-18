@@ -52,6 +52,7 @@ class ChebirliteEnv(DirectRLEnv):
         self.marker_offset = torch.zeros((self.cfg.scene.num_envs, 3), device=self.device)
         self.marker_offset[:,-1] = 0.5  # Offset for visualization
         self._sample_commands()
+        self.previous_actions = torch.zeros((self.cfg.scene.num_envs, self.cfg.action_space), device=self.device)
 
     def _setup_scene(self):
         # Initialize the robot
@@ -173,12 +174,15 @@ class ChebirliteEnv(DirectRLEnv):
 
     def _get_observations(self):
         # Example observation: joint positions and velocities
+        self.previous_actions = self.actions.clone()
+        # print("!!!!!!!!!",self.joint_vel.shape, self.previous_actions.shape)
         return {
             "policy": torch.cat([
                 self.joint_pos[:,:self.base_base_rotor_dof_name_idx[0]], 
                 self.joint_pos[:,self.base_base_rotor_dof_name_idx[0]+1:],
                 self.joint_vel,
                 self.command.unsqueeze(1),
+                self.actions,
             ], dim=-1)
         }
     
